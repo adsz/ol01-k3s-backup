@@ -7,7 +7,6 @@ LOCAL_BACKUP_BASE_PATH=""
 AWS_PROFILE=""
 REPO_BASE_PATH="/tmp"
 
-rm -rf $REPO_BASE_PATH/$2
 # Parse command-line arguments
 while [[ "$#" -gt 0 ]]; do
     case $1 in
@@ -33,10 +32,18 @@ if [ ! -d "$REPO_PATH" ]; then
     git clone "$GITHUB_REPO_URL" "$REPO_PATH"
 else
     echo "Repository already exists at $REPO_PATH. Pulling the latest changes."
-    cd "$REPO_PATH" && git pull
+    cd "$REPO_PATH"
+    git fetch origin
+    git reset --hard origin/main
 fi
 
 cd "$REPO_PATH"
+
+# Ensure the backup_k3s.sh script exists
+if [ ! -f "$REPO_PATH/backup_k3s.sh" ]; then
+    echo "Error: backup_k3s.sh script not found in the repository."
+    exit 1
+fi
 
 # Create a virtual environment if it doesn't exist
 if [ ! -d "$REPO_PATH/$VENV_NAME" ]; then
