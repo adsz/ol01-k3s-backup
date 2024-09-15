@@ -8,7 +8,7 @@ import subprocess
 import logging
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Parse command-line arguments
@@ -21,17 +21,22 @@ parser.add_argument('--aws-region', required=True, help='AWS region to use')
 parser.add_argument('--venv-name', required=True, help='Name of the virtual environment')
 args = parser.parse_args()
 
+logger.debug(f"Received arguments: {args}")
+
 # Ensure the backup path exists
 os.makedirs(args.local_backup_path, exist_ok=True)
+logger.debug(f"Created backup directory: {args.local_backup_path}")
 
 # Initialize boto3 session with the given AWS profile
 session = boto3.Session(profile_name=args.aws_profile, region_name=args.aws_region)
 s3_client = session.client('s3')
+logger.debug(f"Initialized boto3 session with profile {args.aws_profile} and region {args.aws_region}")
 
 def run_command(command):
-    logger.info(f"Running command: {command}")
+    logger.debug(f"Running command: {command}")
     try:
         result = subprocess.run(command, check=True, capture_output=True, text=True)
+        logger.debug(f"Command output: {result.stdout}")
         return result.stdout
     except subprocess.CalledProcessError as e:
         logger.error(f"Command failed with exit code {e.returncode}")
@@ -46,16 +51,21 @@ def backup_k3s():
     manifests_backup_path = os.path.join(args.local_backup_path, "manifests-backup")
     os.makedirs(etcd_backup_path, exist_ok=True)
     os.makedirs(manifests_backup_path, exist_ok=True)
+    logger.debug(f"Created etcd backup directory: {etcd_backup_path}")
+    logger.debug(f"Created manifests backup directory: {manifests_backup_path}")
 
     # Backup etcd
     run_command(["k3s", "etcd-snapshot", "save", "--dir", etcd_backup_path])
+    logger.info("Etcd backup completed")
 
     # Backup Kubernetes resources
     resources = ["deployments", "services", "configmaps", "secrets", "ingresses", "pv", "pvc"]
     for resource in resources:
         output = run_command(["kubectl", "get", resource, "-A", "-o", "yaml"])
-        with open(os.path.join(args.local_backup_path, f"{resource}.yaml"), "w") as f:
+        file_path = os.path.join(args.local_backup_path, f"{resource}.yaml")
+        with open(file_path, "w") as f:
             f.write(output)
+        logger.debug(f"Backed up {resource} to {file_path}")
 
     # Backup all YAML files in the manifests directory
     manifests_dir = "/var/lib/rancher/k3s/server/manifests"
@@ -64,6 +74,7 @@ def backup_k3s():
             src = os.path.join(manifests_dir, filename)
             dst = os.path.join(manifests_backup_path, filename)
             run_command(["cp", src, dst])
+            logger.debug(f"Copied {src} to {dst}")
 
     logger.info("K3s backup completed successfully")
 
@@ -76,8 +87,9 @@ def upload_to_s3():
             relative_path = os.path.relpath(local_file, args.local_backup_path)
             s3_key = f"{args.s3_prefix}/{relative_path}"
             
-            logger.info(f"Uploading {local_file} to s3://{args.s3_bucket}/{s3_key}")
+            logger.debug(f"Uploading {local_file} to s3://{args.s3_bucket}/{s3_key}")
             s3_client.upload_file(local_file, args.s3_bucket, s3_key)
+            logger.debug(f"Upload complete for {local_file}")
 
     logger.info("S3 upload completed successfully")
 
