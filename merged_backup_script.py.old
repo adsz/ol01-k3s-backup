@@ -3,37 +3,11 @@ import subprocess
 import argparse
 import boto3
 from datetime import datetime
-import requests
-
-# Set PATH to include the directory where AWS CLI is installed
-os.environ['PATH'] += os.pathsep + '/usr/local/bin'  # Adjust the path based on the output of `which aws`
 
 def run_command(command):
     """Run a shell command and check for errors."""
-    try:
-        result = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
-        print(result.stdout)
-        if result.stderr:
-            print(result.stderr)
-        return result.stdout
-    except subprocess.CalledProcessError as e:
-        print(f"Error executing command: {command}")
-        print(e.stderr)
-        raise
-
-def send_slack_notification(webhook_url, message):
-    """Send a notification to Slack."""
-    payload = {'text': message}
-    response = requests.post(webhook_url, json=payload)
-    if response.status_code != 200:
-        raise ValueError(f"Request to Slack returned an error {response.status_code}, the response is:\n{response.text}")
-
-def check_aws_cli():
-    """Check if AWS CLI is installed."""
-    try:
-        run_command("aws --version")
-    except Exception as e:
-        raise EnvironmentError("AWS CLI is not installed or not found in PATH") from e
+    result = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
+    return result.stdout
 
 def clone_repo(github_repo_url, repo_path):
     """Clone the GitHub repository."""
@@ -43,9 +17,8 @@ def clone_repo(github_repo_url, repo_path):
 
 def create_venv(venv_path):
     """Create a virtual environment."""
-    if os.path.exists(venv_path):
-        run_command(f"rm -rf {venv_path}")
-    run_command(f"python3 -m venv {venv_path}")
+    if not os.path.exists(venv_path):
+        run_command(f"python3 -m venv {venv_path}")
 
 def activate_venv(venv_path):
     """Activate the virtual environment."""
@@ -54,7 +27,7 @@ def activate_venv(venv_path):
 
 def install_dependencies(venv_path):
     """Install the required dependencies."""
-    pip_install_cmd = f"{activate_venv(venv_path)} && pip install --upgrade pip boto3==1.18.17 botocore==1.21.17 urllib3==1.26.5 requests"
+    pip_install_cmd = f"{activate_venv(venv_path)} && pip install --upgrade pip boto3==1.18.17 botocore==1.21.17 urllib3==1.26.5"
     run_command(pip_install_cmd)
 
 def create_backup(local_backup_path):
@@ -92,32 +65,8 @@ def create_backup(local_backup_path):
 
     return local_backup_path
 
-def create_bucket_if_not_exists(bucket_name, aws_profile, region=None):
-    """Create an S3 bucket if it does not exist."""
-    session = boto3.Session(profile_name=aws_profile)
-    s3_client = session.client('s3')
-    
-    try:
-        s3_client.head_bucket(Bucket=bucket_name)
-        print(f"Bucket '{bucket_name}' already exists.")
-    except s3_client.exceptions.ClientError as e:
-        error_code = int(e.response['Error']['Code'])
-        if error_code == 404:
-            if region:
-                s3_client.create_bucket(
-                    Bucket=bucket_name,
-                    CreateBucketConfiguration={'LocationConstraint': region}
-                )
-            else:
-                s3_client.create_bucket(Bucket=bucket_name)
-            print(f"Bucket '{bucket_name}' created.")
-        else:
-            print(f"Error checking bucket: {e}")
-
 def upload_to_s3(backup_path, s3_bucket, s3_prefix, aws_profile):
     """Upload the backup files to AWS S3."""
-    create_bucket_if_not_exists(s3_bucket, aws_profile, region='eu-central-1')
-    
     session = boto3.Session(profile_name=aws_profile)
     s3_client = session.client('s3')
 
@@ -152,7 +101,6 @@ def main():
     parser.add_argument('--wasabi-profile', required=True, help='Wasabi profile name')
     parser.add_argument('--wasabi-region', required=True, help='Wasabi region')
     parser.add_argument('--wasabi-endpoint', required=True, help='Wasabi endpoint URL')
-    parser.add_argument('--slack-webhook-url', required=True, help='Slack webhook URL for notifications')
     args = parser.parse_args()
 
     repo_base_path = "/tmp"
@@ -162,34 +110,24 @@ def main():
     local_backup_path = os.path.join(args.local_backup_path, f"backup_{timestamp}")
     s3_prefix = f"backup_{timestamp}"
 
-    try:
-        # Check if AWS CLI is installed
-        check_aws_cli()
+    # Clone the repository
+    clone_repo(args.github_repo_url, repo_path)
 
-        # Clone the repository
-        clone_repo(args.github_repo_url, repo_path)
+    # Create and activate the virtual environment
+    create_venv(venv_path)
+    install_dependencies(venv_path)
 
-        # Create and activate the virtual environment
-        create_venv(venv_path)
-        install_dependencies(venv_path)
+    # Create the backup
+    backup_path = create_backup(local_backup_path)
 
-        # Create the backup
-        backup_path = create_backup(local_backup_path)
+    # Upload to AWS S3
+    upload_to_s3(backup_path, args.venv, s3_prefix, args.aws_profile)
 
-        # Upload to AWS S3
-        upload_to_s3(backup_path, args.venv, s3_prefix, args.aws_profile)
+    # Upload to Wasabi S3
+    upload_to_wasabi(backup_path, args.venv, s3_prefix, args.wasabi_profile, args.wasabi_region, args.wasabi_endpoint)
 
-        # Upload to Wasabi S3
-        upload_to_wasabi(backup_path, args.venv, s3_prefix, args.wasabi_profile, args.wasabi_region, args.wasabi_endpoint)
-
-        # Send Slack notification
-        send_slack_notification(args.slack_webhook_url, f"Backup process completed successfully at {timestamp}.")
-
-    except Exception as e:
-        error_message = f"Backup process failed: {e}"
-        print(error_message)
-        send_slack_notification(args.slack_webhook_url, error_message)
-        raise
+    print("Backup process completed successfully.")
 
 if __name__ == "__main__":
     main()
+
