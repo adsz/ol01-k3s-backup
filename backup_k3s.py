@@ -6,6 +6,7 @@ import boto3
 from datetime import datetime
 import subprocess
 import logging
+import shutil
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -47,8 +48,8 @@ def backup_k3s():
     logger.info(f"Starting K3s backup to {args.local_backup_path}")
     
     # Create backup directories
-    etcd_backup_path = os.path.join(args.local_backup_path, "etcd-backup")
-    manifests_backup_path = os.path.join(args.local_backup_path, "manifests-backup")
+    etcd_backup_path = os.path.join(args.local_backup_path, "etcd-backup", "etcd")
+    manifests_backup_path = os.path.join(args.local_backup_path, "manifests-backup", "manifests")
     os.makedirs(etcd_backup_path, exist_ok=True)
     os.makedirs(manifests_backup_path, exist_ok=True)
     logger.debug(f"Created etcd backup directory: {etcd_backup_path}")
@@ -58,14 +59,16 @@ def backup_k3s():
     run_command(["k3s", "etcd-snapshot", "save", "--dir", etcd_backup_path])
     logger.info("Etcd backup completed")
 
+    # Create a name file in the etcd-backup directory
+    with open(os.path.join(args.local_backup_path, "etcd-backup", "etcd", "name"), "w") as f:
+        f.write("etcd-snapshot")
+    logger.debug("Created name file in etcd-backup directory")
+
     # Backup Kubernetes resources
-    resources = ["deployments", "services", "configmaps", "secrets", "ingresses", "pv", "pvc"]
-    for resource in resources:
-        output = run_command(["kubectl", "get", resource, "-A", "-o", "yaml"])
-        file_path = os.path.join(args.local_backup_path, f"{resource}.yaml")
-        with open(file_path, "w") as f:
-            f.write(output)
-        logger.debug(f"Backed up {resource} to {file_path}")
+    k8s_resources = run_command(["kubectl", "get", "all", "-A", "-o", "yaml"])
+    with open(os.path.join(args.local_backup_path, "k8s-resources.yaml"), "w") as f:
+        f.write(k8s_resources)
+    logger.debug("Backed up Kubernetes resources")
 
     # Backup all YAML files in the manifests directory
     manifests_dir = "/var/lib/rancher/k3s/server/manifests"
@@ -73,7 +76,7 @@ def backup_k3s():
         if filename.endswith(".yaml"):
             src = os.path.join(manifests_dir, filename)
             dst = os.path.join(manifests_backup_path, filename)
-            run_command(["cp", src, dst])
+            shutil.copy2(src, dst)
             logger.debug(f"Copied {src} to {dst}")
 
     logger.info("K3s backup completed successfully")
