@@ -7,6 +7,7 @@ import sys
 import boto3
 from botocore.exceptions import ClientError
 import logging
+from datetime import datetime
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -39,146 +40,56 @@ def setup_venv(venv_path):
     subprocess.run([pip_path, "install", "--upgrade", "pip"], check=True)
     subprocess.run([pip_path, "install", "boto3==1.18.17", "botocore==1.21.17", "urllib3==1.26.5"], check=True)
 
-def update_backup_script(script_path):
-    logger.info(f"Updating backup script at {script_path}")
-    updated_content = """#!/bin/bash
-# Default values
-VENV_NAME=""
-LOCAL_BACKUP_BASE_PATH=""
-AWS_PROFILE=""
-AWS_REGION=""
-S3_BUCKET=""
-S3_PREFIX=""
-REPO_BASE_PATH="/tmp"
-
-# Parse command-line arguments
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --venv-name) VENV_NAME="$2"; shift ;;
-        --local-backup-path) LOCAL_BACKUP_BASE_PATH="$2"; shift ;;
-        --aws-profile) AWS_PROFILE="$2"; shift ;;
-        --aws-region) AWS_REGION="$2"; shift ;;
-        --s3-bucket) S3_BUCKET="$2"; shift ;;
-        --s3-prefix) S3_PREFIX="$2"; shift ;;
-    esac
-    shift
-done
-
-# Ensure required arguments are provided
-if [ -z "$VENV_NAME" ] || [ -z "$LOCAL_BACKUP_BASE_PATH" ] || [ -z "$AWS_PROFILE" ] || [ -z "$AWS_REGION" ] || [ -z "$S3_BUCKET" ] || [ -z "$S3_PREFIX" ]; then
-    echo "Error: --venv-name, --local-backup-path, --aws-profile, --aws-region, --s3-bucket, and --s3-prefix arguments are required."
-    exit 1
-fi
-
-REPO_PATH="${REPO_BASE_PATH}/${VENV_NAME}"
-
-# Create the backup directory
-mkdir -p "$LOCAL_BACKUP_BASE_PATH"
-
-# Activate the virtual environment
-source "$REPO_PATH/$VENV_NAME/bin/activate"
-
-# Call the Python backup script
-python3 "$REPO_PATH/backup_k3s.py" --local-backup-path "$LOCAL_BACKUP_BASE_PATH" --s3-bucket "$S3_BUCKET" --s3-prefix "$S3_PREFIX" --aws-profile "$AWS_PROFILE" --aws-region "$AWS_REGION" --venv-name "$VENV_NAME"
-
-# Deactivate the virtual environment
-deactivate
-"""
-    with open(script_path, 'w') as f:
-        f.write(updated_content)
-    os.chmod(script_path, 0o755)  # Make the script executable
-
-def run_backup_script(script_path, venv_name, local_backup_path, aws_profile, aws_region, s3_bucket):
+def run_backup_script(script_path, venv_path, venv_name, local_backup_path, aws_profile, aws_region, s3_bucket):
     logger.info("Running backup script")
-    timestamp = subprocess.check_output(["date", "+%Y-%m-%d_%H-%M-%S"]).decode().strip()
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     backup_path = os.path.join(local_backup_path, f"backup_{timestamp}")
     s3_prefix = f"backup_{timestamp}"
 
+    python_path = os.path.join(venv_path, "bin", "python")
     cmd = [
-        "/bin/bash",
+        python_path,
         script_path,
-        "--venv-name", venv_name,
         "--local-backup-path", backup_path,
+        "--s3-bucket", s3_bucket,
+        "--s3-prefix", s3_prefix,
         "--aws-profile", aws_profile,
         "--aws-region", aws_region,
-        "--s3-bucket", s3_bucket,
-        "--s3-prefix", s3_prefix
+        "--venv-name", venv_name
     ]
     
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        logger.info(f"Backup script output: {result.stdout}")
+        logger.info(f"Backup script output:\n{result.stdout}")
     except subprocess.CalledProcessError as e:
         logger.error(f"Backup script failed with exit code {e.returncode}")
-        logger.error(f"STDOUT: {e.stdout}")
-        logger.error(f"STDERR: {e.stderr}")
+        logger.error(f"STDOUT:\n{e.stdout}")
+        logger.error(f"STDERR:\n{e.stderr}")
         raise
 
     return backup_path, s3_prefix
-
-def upload_to_s3(local_path, bucket, prefix, profile_name, region):
-    logger.info(f"Starting upload to S3 bucket {bucket} with prefix {prefix}")
-    session = boto3.Session(profile_name=profile_name, region_name=region)
-    s3 = session.client('s3')
-
-    if not os.path.exists(local_path):
-        logger.error(f"Local backup path does not exist: {local_path}")
-        return
-
-    files_to_upload = []
-    for root, _, files in os.walk(local_path):
-        for file in files:
-            local_file = os.path.join(root, file)
-            relative_path = os.path.relpath(local_file, local_path)
-            s3_key = os.path.join(prefix, relative_path)
-            files_to_upload.append((local_file, s3_key))
-
-    if not files_to_upload:
-        logger.warning(f"No files found to upload in {local_path}")
-        return
-
-    logger.info(f"Found {len(files_to_upload)} files to upload")
-
-    for local_file, s3_key in files_to_upload:
-        try:
-            logger.info(f"Uploading {local_file} to s3://{bucket}/{s3_key}")
-            s3.upload_file(local_file, bucket, s3_key)
-            logger.info(f"Successfully uploaded {local_file} to s3://{bucket}/{s3_key}")
-        except ClientError as e:
-            logger.error(f"Error uploading {local_file}: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error uploading {local_file}: {e}")
-
-    logger.info("S3 upload process completed")
-
-    # Verify uploads
-    try:
-        logger.info(f"Verifying uploads in s3://{bucket}/{prefix}")
-        response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
-        uploaded_files = [obj['Key'] for obj in response.get('Contents', [])]
-        logger.info(f"Found {len(uploaded_files)} files in S3 bucket")
-        for uploaded_file in uploaded_files:
-            logger.info(f"Verified file in S3: s3://{bucket}/{uploaded_file}")
-    except ClientError as e:
-        logger.error(f"Error verifying uploads: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error verifying uploads: {e}")
 
 def main():
     args = parse_arguments()
     
     repo_path = os.path.join(args.repo_base_path, args.venv)
     venv_path = os.path.join(repo_path, args.venv)
-    backup_script_path = os.path.join(repo_path, "backup_k3s.sh")
+    backup_script_path = os.path.join(repo_path, "backup_k3s.py")
 
     try:
         clone_repo(args.github_repo_url, repo_path)
         setup_venv(venv_path)
         
-        update_backup_script(backup_script_path)  # Force update the backup script
+        logger.info("Arguments being passed to backup_k3s.py:")
+        logger.info(f"--local-backup-path: {args.local_backup_path}")
+        logger.info(f"--s3-bucket: {args.s3_bucket}")
+        logger.info(f"--aws-profile: {args.aws_profile}")
+        logger.info(f"--aws-region: {args.aws_region}")
+        logger.info(f"--venv-name: {args.venv}")
 
         backup_path, s3_prefix = run_backup_script(
             backup_script_path,
+            venv_path,
             args.venv, 
             args.local_backup_path, 
             args.aws_profile, 
@@ -188,15 +99,6 @@ def main():
 
         logger.info(f"Backup completed. Local backup path: {backup_path}")
         logger.info(f"S3 prefix for upload: {s3_prefix}")
-
-        upload_to_s3(
-            backup_path, 
-            args.s3_bucket, 
-            s3_prefix, 
-            args.aws_profile, 
-            args.aws_region
-        )
-
         logger.info("Backup process completed successfully.")
 
     except subprocess.CalledProcessError as e:

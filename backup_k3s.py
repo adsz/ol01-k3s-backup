@@ -42,10 +42,29 @@ def run_command(command):
     except subprocess.CalledProcessError as e:
         logger.error(f"Command failed with exit code {e.returncode}")
         logger.error(f"Error output: {e.stderr}")
-        raise
+        return e.stderr
+
+def get_k3s_info():
+    logger.info("Gathering K3s information")
+    k3s_info = {}
+    
+    # Check K3s version
+    k3s_info['version'] = run_command(['k3s', '--version'])
+    
+    # Check if etcd is being used
+    k3s_info['uses_etcd'] = os.path.exists('/var/lib/rancher/k3s/server/db/etcd')
+    
+    # Check K3s service status
+    k3s_info['service_status'] = run_command(['systemctl', 'is-active', 'k3s'])
+    
+    return k3s_info
 
 def backup_k3s():
     logger.info(f"Starting K3s backup to {args.local_backup_path}")
+    
+    # Get K3s info
+    k3s_info = get_k3s_info()
+    logger.info(f"K3s info: {k3s_info}")
     
     # Create backup directories
     etcd_backup_path = os.path.join(args.local_backup_path, "etcd-backup", "etcd")
@@ -55,29 +74,38 @@ def backup_k3s():
     logger.debug(f"Created etcd backup directory: {etcd_backup_path}")
     logger.debug(f"Created manifests backup directory: {manifests_backup_path}")
 
-    # Backup etcd
-    run_command(["k3s", "etcd-snapshot", "save", "--dir", etcd_backup_path])
-    logger.info("Etcd backup completed")
-
-    # Create a name file in the etcd-backup directory
-    with open(os.path.join(args.local_backup_path, "etcd-backup", "etcd", "name"), "w") as f:
-        f.write("etcd-snapshot")
-    logger.debug("Created name file in etcd-backup directory")
+    # Backup etcd if it's being used
+    if k3s_info['uses_etcd']:
+        run_command(["k3s", "etcd-snapshot", "save", "--dir", etcd_backup_path])
+        logger.info("Etcd backup completed")
+    else:
+        logger.info("Skipping etcd backup as it's not being used")
 
     # Backup Kubernetes resources
-    k8s_resources = run_command(["kubectl", "get", "all", "-A", "-o", "yaml"])
-    with open(os.path.join(args.local_backup_path, "k8s-resources.yaml"), "w") as f:
-        f.write(k8s_resources)
-    logger.debug("Backed up Kubernetes resources")
+    resources = ["deployments", "services", "configmaps", "secrets", "ingresses", "pv", "pvc"]
+    for resource in resources:
+        output = run_command(["kubectl", "get", resource, "-A", "-o", "yaml"])
+        file_path = os.path.join(args.local_backup_path, f"{resource}.yaml")
+        with open(file_path, "w") as f:
+            f.write(output)
+        logger.debug(f"Backed up {resource} to {file_path}")
 
     # Backup all YAML files in the manifests directory
     manifests_dir = "/var/lib/rancher/k3s/server/manifests"
-    for filename in os.listdir(manifests_dir):
-        if filename.endswith(".yaml"):
-            src = os.path.join(manifests_dir, filename)
-            dst = os.path.join(manifests_backup_path, filename)
-            shutil.copy2(src, dst)
-            logger.debug(f"Copied {src} to {dst}")
+    if os.path.exists(manifests_dir):
+        for filename in os.listdir(manifests_dir):
+            if filename.endswith(".yaml"):
+                src = os.path.join(manifests_dir, filename)
+                dst = os.path.join(manifests_backup_path, filename)
+                shutil.copy2(src, dst)
+                logger.debug(f"Copied {src} to {dst}")
+    else:
+        logger.warning(f"Manifests directory not found: {manifests_dir}")
+
+    # Save K3s info
+    with open(os.path.join(args.local_backup_path, "k3s_info.txt"), "w") as f:
+        for key, value in k3s_info.items():
+            f.write(f"{key}: {value}\n")
 
     logger.info("K3s backup completed successfully")
 
